@@ -1,15 +1,18 @@
 import json
 import logging
+from operator import le
 import numpy as np
 import joblib
 from pathlib import Path
 from datetime import datetime
+import traceback
 
 from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 from imblearn.over_sampling import SMOTE
+from sklearn.preprocessing import LabelEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,14 @@ EXPERIMENTOS_PATH = ROOT_DIR / "experimentos_mlp.json"
 
 TEMAS = ["Tema 1", "Tema 2", "Tema 3", "Tema 4", "Tema 5"]
 
+
+MAPA = {
+    "bajo": 0,
+    "medio": 1,
+    "alto": 2
+}
+
+MAPA_INV = {v: k for k, v in MAPA.items()}
 
 # ======================
 # Serialización segura
@@ -66,10 +77,12 @@ def generar_dataset_sintetico(n: int = 500, seed: int = 42) -> list:
     dataset = []
 
     perfiles = {
-        "avanzado":  {"media": 85, "std": 8,  "peso": 0.25},
-        "medio":     {"media": 62, "std": 10, "peso": 0.35},
-        "debil":     {"media": 35, "std": 10, "peso": 0.25},
-        "irregular": {"media": 60, "std": 25, "peso": 0.15},
+        "avanzado": {"media": 85, "std": 15, "peso": 0.18},
+        "medio": {"media": 62, "std": 15, "peso": 0.27},
+        "debil": {"media": 35, "std": 15, "peso": 0.18},
+        "irregular": {"media": 60, "std": 25, "peso": 0.20},
+        "frontera_alto": {"media": 78, "std": 12, "peso": 0.09},
+        "frontera_bajo": {"media": 48, "std": 12, "peso": 0.08}
     }
 
     for _ in range(n):
@@ -84,7 +97,7 @@ def generar_dataset_sintetico(n: int = 500, seed: int = 42) -> list:
         promedio = np.mean(scores)
         dataset.append({
             "scores": [round(s, 1) for s in scores],
-            "nivel_general": clasificar_nivel(promedio)
+            "nivel_general": MAPA[clasificar_nivel(promedio)]
         })
 
     return dataset
@@ -101,6 +114,8 @@ def cargar_resultados_reales() -> list:
 
     scores_por_tema = {t: [] for t in TEMAS}
     for r in resultados:
+        if not isinstance(r, dict):
+            continue
         tema = r.get("tema", "")
         for t in TEMAS:
             if t in tema:
@@ -114,7 +129,7 @@ def cargar_resultados_reales() -> list:
     promedio = np.mean(scores)
     return [{
         "scores": [round(s, 1) for s in scores],
-        "nivel_general": clasificar_nivel(promedio)
+        "nivel_general": MAPA[clasificar_nivel(promedio)]
     }]
 
 
@@ -126,8 +141,9 @@ def construir_dataset(n_sintetico: int = 500) -> tuple:
     with open(DATASET_PATH, "w", encoding="utf-8") as f:
         json.dump(convertir_serializable(dataset), f, ensure_ascii=False, indent=2)
 
-    X = np.array([d["scores"] for d in dataset])
-    y = np.array([d["nivel_general"] for d in dataset])
+    X = np.array([d["scores"] for d in dataset], dtype=np.float64)
+    y = np.array([d["nivel_general"] for d in dataset], dtype=str)
+
     return X, y
 
 
@@ -155,10 +171,14 @@ def analizar_balance(y: np.ndarray) -> dict:
 # ======================
 
 def preparar_datos(X: np.ndarray, y: np.ndarray):
+    y = np.array([MAPA_INV.get(v, v) if isinstance(v, str) else v for v in y])
+    y = y.astype(int)  # esto va ANTES del primer split
+
     # Split 80% train+val / 20% test
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
+
     # Split 85% train / 15% val (del 80% anterior)
     X_train, X_val, y_train, y_val = train_test_split(
         X_train, y_train, test_size=0.15, random_state=42, stratify=y_train
@@ -186,9 +206,11 @@ def entrenar_modelo(hidden_layers: tuple, activation: str,
         max_iter=500,
         random_state=42,
         early_stopping=True,
+        alpha=0.01,
         validation_fraction=0.1,
         n_iter_no_change=15
     )
+
     mlp.fit(X_train, y_train)
     y_pred_val = mlp.predict(X_val)
     acc = float(round(accuracy_score(y_val, y_pred_val) * 100, 2))
@@ -225,12 +247,13 @@ def experimento_arquitectura(X_train, X_val, X_test, y_train, y_val, y_test) -> 
             "acc_val": acc_val,
             "f1_val": f1_val,
             "acc_test": acc_test,
-            "f1_test": f1_test
+            "f1_test": f1_test,
+            "iteraciones": modelo.n_iter_ 
         })
         logger.info(f"{nombre}: acc_test={acc_test}%, f1_test={f1_test}")
 
     # Ganador por F1-Score en test
-    ganador = max(resultados, key=lambda x: x["f1_test"])
+    ganador = max(resultados, key=lambda x: (x["f1_test"], -x["iteraciones"]))
     mejor_capas = eval(ganador["capas"])
     logger.info(f"Ganador exp 1: {ganador['nombre']} → capas={mejor_capas}")
 
@@ -258,11 +281,12 @@ def experimento_activacion(X_train, X_val, X_test, y_train, y_val, y_test, capas
             "acc_val": acc_val,
             "f1_val": f1_val,
             "acc_test": acc_test,
-            "f1_test": f1_test
+            "f1_test": f1_test,
+            "iteraciones": modelo.n_iter_
         })
         logger.info(f"Activación {act}: acc_test={acc_test}%, f1_test={f1_test}")
 
-    ganador = max(resultados, key=lambda x: x["f1_test"])
+    ganador = max(resultados, key=lambda x: (x["f1_test"], -x["iteraciones"]))
     mejor_activacion = ganador["activacion"]
     logger.info(f"Ganador exp 2: activación={mejor_activacion}")
 
@@ -285,11 +309,16 @@ def experimento_solver(X_train, X_val, X_test, y_train, y_val, y_test, capas, ac
             solver=solver,
             max_iter=500,
             random_state=42,
-            early_stopping=True if solver != "lbfgs" else False,
-            validation_fraction=0.1 if solver != "lbfgs" else 0.0,
-            n_iter_no_change=15 if solver != "lbfgs" else 10
+            early_stopping=True,
+            alpha=0.01
         )
-        mlp.fit(X_train, y_train)
+
+        try:
+            mlp.fit(X_train, y_train)
+        except Exception:
+            print(traceback.format_exc())
+            raise
+
         y_pred_val = mlp.predict(X_val)
         acc_val = float(round(accuracy_score(y_val, y_pred_val) * 100, 2))
         f1_val = float(round(f1_score(y_val, y_pred_val, average="weighted"), 4))
@@ -306,11 +335,12 @@ def experimento_solver(X_train, X_val, X_test, y_train, y_val, y_test, capas, ac
             "acc_val": acc_val,
             "f1_val": f1_val,
             "acc_test": acc_test,
-            "f1_test": f1_test
+            "f1_test": f1_test,
+            "iteraciones": mlp.n_iter_
         })
         logger.info(f"Solver {solver}: acc_test={acc_test}%, f1_test={f1_test}")
 
-    ganador = max(resultados, key=lambda x: x["f1_test"])
+    ganador = max(resultados, key=lambda x: (x["f1_test"], -x["iteraciones"]))
     mejor_solver = ganador["solver"]
     logger.info(f"Ganador exp 3: solver={mejor_solver}")
 
@@ -324,10 +354,13 @@ def experimento_solver(X_train, X_val, X_test, y_train, y_val, y_test, capas, ac
 def entrenar_y_guardar(n_sintetico: int = 500) -> dict:
     logger.info("Construyendo dataset...")
     X, y = construir_dataset(n_sintetico)
-    balance = analizar_balance(y)
-    logger.info(f"Balance: {balance}")
+    balance_original = analizar_balance(y)
+    logger.info(f"Balance: {balance_original}")
 
     X_train, X_val, X_test, y_train, y_val, y_test, scaler = preparar_datos(X, y)
+    
+    balance_smote = analizar_balance(y_train)
+    logger.info(f"Balance con SMOTE: {balance_smote}")
 
     # Experimento 1 → encuentra mejor arquitectura
     logger.info("Experimento 1: Arquitectura...")
@@ -342,24 +375,25 @@ def entrenar_y_guardar(n_sintetico: int = 500) -> dict:
     exp3, mejor_solver = experimento_solver(X_train, X_val, X_test, y_train, y_val, y_test,capas=mejor_capas, activacion=mejor_activacion)
 
     # Modelo final con los mejores parámetros
+    early_stopping = mejor_solver in ("adam", "sgd")
+
     mejor_modelo = MLPClassifier(
         hidden_layer_sizes=mejor_capas,
         activation=mejor_activacion,
         solver=mejor_solver,
         max_iter=500,
         random_state=42,
-        early_stopping=True if mejor_solver != "lbfgs" else False,
-        validation_fraction=0.1 if mejor_solver != "lbfgs" else 0.0,
-        n_iter_no_change=15 if mejor_solver != "lbfgs" else 10
+        early_stopping=early_stopping,
+        alpha=0.01
     )
-    mejor_modelo.fit(X_train, y_train)
 
+    mejor_modelo.fit(X_train, y_train)
     y_pred_final = mejor_modelo.predict(X_test)
     acc_final = float(round(accuracy_score(y_test, y_pred_final) * 100, 2))
     f1_final = float(round(f1_score(y_test, y_pred_final, average="weighted"), 4))
     reporte = {k: convertir_serializable(v) for k, v in
                classification_report(y_test, y_pred_final, output_dict=True).items()}
-    cm = confusion_matrix(y_test, y_pred_final, labels=["bajo", "medio", "alto"]).tolist()
+    cm = confusion_matrix(y_test, y_pred_final).tolist()
 
     # Guardar modelo y scaler
     joblib.dump(mejor_modelo, MODELO_PATH)
@@ -369,7 +403,8 @@ def entrenar_y_guardar(n_sintetico: int = 500) -> dict:
     experimentos = {
         "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "n_sintetico_base": n_sintetico,
-        "balance": balance,
+        "balance_original": balance_original,
+        "balance_smote": balance_smote,
         "exp1_arquitectura": exp1,
         "exp2_activacion": exp2,
         "exp3_solver": exp3,
@@ -399,25 +434,32 @@ def modelo_disponible() -> bool:
 
 
 def predecir_nivel_general(scores_por_tema: dict) -> dict:
+
     if not modelo_disponible():
         raise ValueError("El modelo no está entrenado todavía.")
 
     modelo = joblib.load(MODELO_PATH)
     scaler = joblib.load(SCALER_PATH)
 
+
     vector = [scores_por_tema.get(t, 0) for t in TEMAS]
     X = scaler.transform([vector])
-    nivel_general = modelo.predict(X)[0]
+
+    # predicción NUMÉRICA
+    nivel_num = int(modelo.predict(X)[0])
+
+    # conversión a texto SOLO al final
+    nivel_general = MAPA_INV[nivel_num]
+
+    # probabilidades (siguen siendo coherentes con clases numéricas)
     proba = modelo.predict_proba(X)[0]
     clases = modelo.classes_
+    valores = {MAPA["bajo"]: 0, MAPA["medio"]: 0.5, MAPA["alto"]: 1}
 
-    clases_list = list(clases)
-    prob_aprobar = 0
-    if "medio" in clases_list:
-        prob_aprobar += proba[clases_list.index("medio")]
-    if "alto" in clases_list:
-        prob_aprobar += proba[clases_list.index("alto")]
-
+    prob_aprobar = sum(
+        p * valores[c]
+        for p, c in zip(proba, clases)
+    )
     diagnostico_subtemas = generar_diagnostico_subtemas()
 
     return {
@@ -429,34 +471,50 @@ def predecir_nivel_general(scores_por_tema: dict) -> dict:
 
 
 def generar_diagnostico_subtemas() -> list:
+
     if not RESULTADOS_PATH.exists():
         return []
+
     with open(RESULTADOS_PATH, "r", encoding="utf-8") as f:
-        try:
-            resultados = json.load(f)
-        except Exception:
-            return []
+        resultados = json.load(f)
+
+        if not isinstance(resultados, list):
+            resultados = []
+
+        resultados = [r for r in resultados if isinstance(r, dict)]
 
     subtemas = {}
+
     for r in resultados:
-        subtema = r.get("subtema", "").strip()
-        porcentaje = r.get("porcentaje", 0)
+        subtema = r.get("subtema")
+
+        if not isinstance(subtema, str):
+            continue
+
+        subtema = subtema.strip()
+        try:
+            porcentaje = float(r.get("porcentaje", 0))
+        except:
+            continue
+
         if subtema:
-            if subtema not in subtemas:
-                subtemas[subtema] = []
-            subtemas[subtema].append(porcentaje)
+            subtemas.setdefault(subtema, []).append(porcentaje)
 
     diagnostico = []
-    for subtema, porcentajes in subtemas.items():
-        promedio = round(float(np.mean(porcentajes)), 1)
+
+    for subtema, valores in subtemas.items():
+        promedio = round(float(np.mean(valores)), 1)
+
         diagnostico.append({
             "subtema": subtema,
             "promedio": promedio,
             "nivel": clasificar_nivel(promedio)
         })
+        
+    print("DEBUG RESULTADOS SAMPLE:", resultados[:3])
+    print("TIPOS:", [type(r.get("nivel_general")) for r in resultados[:3]])
 
-    diagnostico.sort(key=lambda x: x["promedio"])
-    return diagnostico
+    return sorted(diagnostico, key=lambda x: x["promedio"])
 
 
 def obtener_scores_por_tema() -> dict:
@@ -464,7 +522,7 @@ def obtener_scores_por_tema() -> dict:
         return {}
     with open(RESULTADOS_PATH, "r", encoding="utf-8") as f:
         try:
-            resultados = json.load(f)
+            resultados = json.load(f) or []
         except Exception:
             return {}
 
