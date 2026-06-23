@@ -594,11 +594,11 @@ elif menu == "📊 Resultados":
 
     st.markdown("---")
 
-    # Historial de exámenes
     st.subheader("📋 Historial de exámenes")
-    for r in reversed(resultados):
-        icono = "✅" if r["porcentaje"] >= 70 else "⚠️"
-        st.markdown(f"{icono} **{r['fecha']}** — {r['tema']} › {r['subtema']} — {r['correctas']}/{r['total']} ({r['porcentaje']}%)")
+    with st.container(height=300):
+        for r in reversed(resultados):
+            icono = "✅" if r["porcentaje"] >= 70 else "⚠️"
+            st.markdown(f"{icono} **{r['fecha']}** — {r['tema']} › {r['subtema']} — {r['correctas']}/{r['total']} ({r['porcentaje']}%)")
 
     st.markdown("---")
 
@@ -620,31 +620,39 @@ elif menu == "📊 Resultados":
 
                 col1, col2 = st.columns(2)
                 with col1:
+                    MAPA_INV = {0: "bajo", 1: "medio", 2: "alto"}
+
                     nivel = diagnostico["nivel_general"]
-                    icono_nivel = "🟢" if nivel == "alto" else "🟡" if nivel == "medio" else "🔴"
-                    st.metric("Nivel general", f"{icono_nivel} {nivel.capitalize()}")
+
+                    if isinstance(nivel, str):
+                        nivel_nombre = nivel
+                    else:
+                        nivel_nombre = MAPA_INV.get(int(nivel), "desconocido")
+                    icono_nivel = "🟢" if nivel_nombre == "alto" else "🟡" if nivel_nombre == "medio" else "🔴"
+                    st.metric("Nivel general", f"{icono_nivel} {nivel_nombre.capitalize()}")
                 with col2:
                     st.metric("Probabilidad de aprobar", f"{diagnostico['prob_aprobar']}%")
 
                 st.markdown("---")
                 st.subheader("📌 Diagnóstico por subtema")
 
-                for item in diagnostico["diagnostico_subtemas"]:
-                    nivel_sub = item["nivel"]
-                    if nivel_sub == "alto":
-                        icono = "✔"
-                        color = "🟢"
-                        texto = "dominio alto"
-                    elif nivel_sub == "medio":
-                        icono = "✔"
-                        color = "🟡"
-                        texto = "dominio medio"
-                    else:
-                        icono = "✘"
-                        color = "🔴"
-                        texto = "reforzar"
+                with st.container(height=250):
+                    for item in diagnostico["diagnostico_subtemas"]:
+                        nivel_sub = item["nivel"]
+                        if nivel_sub == "alto":
+                            icono = "✔"
+                            color = "🟢"
+                            texto = "dominio alto"
+                        elif nivel_sub == "medio":
+                            icono = "✔"
+                            color = "🟡"
+                            texto = "dominio medio"
+                        else:
+                            icono = "✘"
+                            color = "🔴"
+                            texto = "reforzar"
 
-                    st.markdown(f"{color} **{item['subtema'].capitalize()}**: {texto} ({item['promedio']}%)")
+                        st.markdown(f"{color} **{item['subtema'].capitalize()}**: {texto} ({item['promedio']}%)")
 
                 # Recomendación
                 a_reforzar = [i["subtema"] for i in diagnostico["diagnostico_subtemas"] if i["nivel"] == "bajo"]
@@ -665,32 +673,61 @@ elif menu == "📊 Resultados":
 
         with st.expander("Experimento 1 — Arquitectura de la red"):
             import pandas as pd
-            df1 = pd.DataFrame(experimentos["exp1_arquitectura"])[["nombre", "capas", "acc_test", "f1_test"]]
-            df1.columns = ["Modelo", "Capas", "Accuracy Test (%)", "F1-Score Test"]
+            df1 = pd.DataFrame(experimentos["exp1_arquitectura"])[["nombre", "capas", "acc_test", "f1_test", "iteraciones"]]
+            df1.columns = ["Modelo", "Capas", "Accuracy Test (%)", "F1-Score Test", "Iteraciones"]
             st.dataframe(df1, use_container_width=True)
 
         with st.expander("Experimento 2 — Función de activación"):
-            df2 = pd.DataFrame(experimentos["exp2_activacion"])[["nombre", "activacion", "acc_test", "f1_test"]]
-            df2.columns = ["Modelo", "Activación", "Accuracy Test (%)", "F1-Score Test"]
+            df2 = pd.DataFrame(experimentos["exp2_activacion"])[["nombre", "activacion", "acc_test", "f1_test", "iteraciones"]]
+            df2.columns = ["Modelo", "Activación", "Accuracy Test (%)", "F1-Score Test", "Iteraciones"]
             st.dataframe(df2, use_container_width=True)
 
         with st.expander("Experimento 3 — Solver de optimización"):
-            df3 = pd.DataFrame(experimentos["exp3_solver"])[["nombre", "solver", "acc_test", "f1_test"]]
-            df3.columns = ["Modelo", "Solver", "Accuracy Test (%)", "F1-Score Test"]
+            df3 = pd.DataFrame(experimentos["exp3_solver"])[["nombre", "solver", "acc_test", "f1_test", "iteraciones"]]
+            df3.columns = ["Modelo", "Solver", "Accuracy Test (%)", "F1-Score Test", "Iteraciones"]
             st.dataframe(df3, use_container_width=True)
 
         mejor = experimentos.get("mejor_modelo", {})
-        balance = experimentos.get("balance", {})
+        balance_original = experimentos.get("balance_original", {})
+        balance_smote = experimentos.get("balance_smote", {})
 
-        with st.expander("📊 Balance del dataset y modelo final"):
-            st.markdown("**Distribución de clases:**")
-            for clase, datos in balance.get("distribucion", {}).items():
-                st.markdown(f"- **{clase}**: {datos['count']} registros ({datos['porcentaje']}%)")
-            balanceado = balance.get("balanceado", False)
-            if balanceado:
+        with st.expander("📊 Balance del dataset y entrenamiento"):
+
+            st.markdown("### Distribución original")
+
+            perfiles = {0: "Bajo", 1: "Medio", 2: "Alto"}
+            for clase, datos in balance_original.get("distribucion", {}).items():
+                nombre = perfiles.get(int(clase), str(clase))
+                st.markdown(
+                    f"- **{nombre.capitalize()}**: {datos['count']} registros "
+                    f"({datos['porcentaje']}%)"
+                )
+
+            estado = balance_original.get("estado_balance")
+
+            if estado == "balanceado":
                 st.success("✅ Dataset balanceado")
+            elif estado == "moderadamente desbalanceado":
+                st.warning("⚠️ Dataset moderadamente desbalanceado")
             else:
-                st.warning("⚠️ Dataset desbalanceado — se recomienda aplicar SMOTE o class_weight")
+                st.error("❌ Dataset fuertemente desbalanceado")
+
+            st.markdown("### Distribución luego de SMOTE")
+
+            perfiles = {0: "Bajo", 1: "Medio", 2: "Alto"}
+            for clase, datos in balance_smote.get("distribucion", {}).items():
+                nombre = perfiles.get(int(clase), str(clase))
+                st.markdown(
+                    f"- **{nombre.capitalize()}**: {datos['count']} registros "
+                    f"({datos['porcentaje']}%)"
+                )
+
+            st.success(
+                "✅ El conjunto de entrenamiento fue balanceado mediante SMOTE "
+                "antes del entrenamiento del MLP."
+            )
+            
+            st.divider()
 
             st.markdown(f"**Mejor modelo:** capas={mejor.get('capas')}, activación={mejor.get('activacion')}, solver={mejor.get('solver')}")
             st.markdown(f"**Accuracy final:** {mejor.get('acc_test')}%  |  **F1-Score:** {mejor.get('f1_test')}")
